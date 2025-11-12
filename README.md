@@ -4,4 +4,4 @@ For use during the 3rd CDT competition for Fall 2025 semester. Intended to harde
 
 #### Running Windows Script:
 
-iex (iwr -UseBasicParsing "https://raw.githubusercontent.com/jaxiom/Windows-CDT-Blue-Script/refs/heads/main/run_windows_harden.ps1").Content
+iex (iwr -UseBasicParsing "https://raw.githubusercontent.com/jaxiom/Windows-CDT-Blue-Script/refs/heads/main/windows_harden.ps1").Content
