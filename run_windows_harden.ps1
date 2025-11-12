@@ -1,4 +1,4 @@
- CCDC Windows Hardening - Quick Run Script
+# CCDC Windows Hardening - Quick Run Script
 # This script downloads and executes the Ansible playbook
 
 param(
