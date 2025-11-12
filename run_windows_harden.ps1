@@ -32,14 +32,46 @@ if (-not $ansibleInstalled) {
     # Install Python if not present
     $pythonInstalled = Get-Command python -ErrorAction SilentlyContinue
     if (-not $pythonInstalled) {
-        Write-Host "Python not found. Please install Python 3.8+ first from python.org" -ForegroundColor Red
+        Write-Host "ERROR: Python not found. Please install Python 3.8+ first from python.org" -ForegroundColor Red
         Write-Host "Or use: winget install Python.Python.3.11" -ForegroundColor Yellow
         exit 1
     }
     
+    Write-Host "Python found. Installing Ansible and pywinrm..." -ForegroundColor Yellow
+    
     # Install Ansible via pip
-    python -m pip install --upgrade pip
-    python -m pip install ansible pywinrm
+    python -m pip install --upgrade pip --quiet
+    python -m pip install ansible pywinrm --quiet
+    
+    Write-Host "Ansible installed. Locating ansible-playbook..." -ForegroundColor Yellow
+    
+    # Refresh PATH in current session
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+    
+    # Try to find ansible-playbook in common locations
+    $pythonScriptsPath = python -c "import os, sys; print(os.path.join(sys.prefix, 'Scripts'))"
+    $ansiblePath = Join-Path $pythonScriptsPath "ansible-playbook.exe"
+    
+    if (Test-Path $ansiblePath) {
+        Write-Host "Found ansible-playbook at: $ansiblePath" -ForegroundColor Green
+        # Add Python Scripts to PATH for this session
+        $env:Path = "$pythonScriptsPath;$env:Path"
+    } else {
+        Write-Host "ERROR: ansible-playbook not found after installation" -ForegroundColor Red
+        Write-Host "Expected location: $ansiblePath" -ForegroundColor Yellow
+        Write-Host "Please close this PowerShell window and open a new one, then run the script again." -ForegroundColor Yellow
+        exit 1
+    }
+    
+    # Verify it's accessible now
+    $ansibleInstalled = Get-Command ansible-playbook -ErrorAction SilentlyContinue
+    if (-not $ansibleInstalled) {
+        Write-Host "ERROR: Still cannot find ansible-playbook after PATH update" -ForegroundColor Red
+        Write-Host "Try running: $ansiblePath directly" -ForegroundColor Yellow
+        exit 1
+    }
+    
+    Write-Host "Ansible is ready!" -ForegroundColor Green
 }
 
 # Download the playbook
