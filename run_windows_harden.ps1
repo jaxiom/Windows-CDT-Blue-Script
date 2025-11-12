@@ -2,7 +2,7 @@
 # This script downloads and executes the Ansible playbook
 
 param(
-    [string]$PlaybookUrl = "https://raw.githubusercontent.com/jaxiom/main/BLUE-TEAM-TOOLS/windows_harden.yml",
+    [string]$PlaybookUrl = "https://raw.githubusercontent.com/jaxiom/Windows-CDT-Blue-Script/blob/main/windows_harden.yml",
     [string]$InventoryContent = "localhost ansible_connection=local"
 )
 
