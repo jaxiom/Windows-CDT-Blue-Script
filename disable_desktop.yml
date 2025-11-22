@@ -1,0 +1,313 @@
+---
+# Ansible Playbook to Disable Desktop Environment on Kali VMs with Reboot
+# Run with: ansible-playbook disable_desktop_with_reboot.yml
+# Run without reboot: ansible-playbook disable_desktop_with_reboot.yml --skip-tags reboot
+
+- name: Disable Desktop Environment and Setup CLI-Only Mode
+  hosts: kali_vms
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    # Path to local image file to transfer (leave empty to auto-generate on hosts)
+    local_image_path: ""  # Example: "{{ playbook_dir }}/cli_instruction.png"
+    remote_image_path: "/home/redteam/desktop.png"
+    username: "{{ ansible_user }}"
+    
+  tasks:
+    - name: Display configuration start
+      debug:
+        msg: "Starting desktop environment removal on {{ inventory_hostname }}"
+    
+    # ============================================
+    # TRANSFER IMAGE (if specified)
+    # ============================================
+    
+    - name: Check if local image exists
+      local_action:
+        module: stat
+        path: "{{ local_image_path }}"
+      register: local_image_stat
+      when: local_image_path != ""
+      
+    - name: Transfer instruction image to remote host
+      copy:
+        src: "{{ local_image_path }}"
+        dest: "{{ remote_image_path }}"
+        mode: '0644'
+      when: 
+        - local_image_path != ""
+        - local_image_stat.stat.exists is defined
+        - local_image_stat.stat.exists
+    
+    # ============================================
+    # DISABLE DESKTOP MANAGERS
+    # ============================================
+    
+    - name: Stop all display managers
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - gdm3
+        - gdm
+        - lightdm
+        - sddm
+        - xdm
+      ignore_errors: yes
+      
+    - name: Disable display managers from starting on boot
+      systemd:
+        name: "{{ item }}"
+        enabled: no
+      loop:
+        - gdm3
+        - gdm
+        - lightdm
+        - sddm
+        - xdm
+      ignore_errors: yes
+    
+    - name: Set default target to multi-user (text mode)
+      command: systemctl set-default multi-user.target
+      changed_when: true
+    
+    - name: Display desktop environment disabled message
+      debug:
+        msg: "✓ Desktop environment disabled on {{ inventory_hostname }}"
+    
+    # ============================================
+    # INSTALL REQUIRED PACKAGES
+    # ============================================
+    
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      
+    - name: Install minimal X server and image viewer packages
+      apt:
+        name:
+          - xinit
+          - feh
+          - xserver-xorg-core
+          - xserver-xorg-video-fbdev
+          - imagemagick
+        state: present
+        install_recommends: no
+      ignore_errors: yes
+    
+    # ============================================
+    # CREATE INSTRUCTION DISPLAY SCRIPT
+    # ============================================
+    
+    - name: Create instruction image display script
+      copy:
+        dest: /usr/local/bin/show-cli-instruction.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Display CLI instruction image on framebuffer
+          
+          IMAGE_PATH="{{ remote_image_path }}"
+          
+          # If image doesn't exist, create a simple text-based one
+          if [ ! -f "$IMAGE_PATH" ]; then
+              # Install imagemagick if needed for creating image
+              command -v convert >/dev/null 2>&1 || apt-get install -y -qq imagemagick 2>/dev/null
+              
+              # Create ASCII art image with text
+              convert -size 1920x1080 xc:black \
+                  -font DejaVu-Sans-Mono -pointsize 20 -fill '#ffffffff' \
+                  -gravity center \
+                  -annotate +0-400 '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣴⠶⠶⣶⠶⠶⠶⠶⠶⠶⠶⠶⠶⢶⠶⠶⠶⠤⠤⠤⠤⣄⣀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀' \
+                  -annotate +0-380 '⠀⠀⠀⠀⠀⠀⠀⠀⣠⡾⠋⠀⠀⠊⠀⠀⠀⠀⠀⠀⠀⠀⠒⠒⠒⠀⠀⠀⠀⠤⢤⣤⣄⠉⠉⠛⠛⠷⣦⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀' \
+                  -annotate +0-360 '⠀⠀⠀⠀⠀⠀⠀⣰⠟⠀⠀⠀⠀⠀⠐⠋⢑⣤⣶⣶⣤⡢⡀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⣄⡂⠀⠀⠶⢄⠙⢷⣤⠀⠀⠀⠀⠀⠀⠀⠀' \
+                  -annotate +0-340 '⠀⠀⠀⠀⠀⠀⣸⡿⠚⠉⡀⠀⠀⠀⠀⢰⣿⣿⣿⣿⣿⣿⡄⠀⠀⠀⢢⠀⠀⡀⣰⣿⣿⣿⣿⣦⡀⠀⠀⠡⡀⢹⡆⠀⠀⠀⠀⠀⠀⠀' \
+                  -annotate +0-320 '⠀⠀⠀⠀⢀⣴⠏⠀⣀⣀⣀⡤⢤⣄⣠⣿⣿⣿⣿⣻⣿⣿⣷⠀⢋⣾⠈⠙⣶⠒⢿⣿⣿⣿⣿⡿⠟⠃⠀⡀⠡⠼⣧⡀⠀⠀⠀⠀⠀⠀' \
+                  -annotate +0-300 '⠀⠀⢀⣴⣿⢃⡴⢊⢽⣶⣤⣀⠀⠊⠉⠉⡛⢿⣿⣿⣿⠿⠋⢀⡀⠁⠀⠀⢸⣁⣀⣉⣉⣉⡉⠀⠩⡡⠀⣩⣦⠀⠈⠻⣦⡀⠀⠀⠀⠀' \
+                  -annotate +0-280 '⠀⢠⡟⢡⠇⡞⢀⠆⠀⢻⣿⣿⣷⣄⠀⢀⠈⠂⠈⢁⡤⠚⡟⠉⠀⣀⣀⠀⠈⠳⣍⠓⢆⢀⡠⢀⣨⣴⣿⣿⡏⢀⡆⠀⢸⡇⠀⠀⠀⠀' \
+                  -annotate +0-260 '⠀⣾⠁⢸⠀⠀⢸⠀⠀⠀⠹⣿⣿⣿⣿⣶⣬⣦⣤⡈⠀⠀⠇⠀⠛⠉⣩⣤⣤⣤⣿⣤⣤⣴⣾⣿⣿⣿⣿⣿⣧⠞⠀⠀⢸⡇⠀⠀⠀⠀' \
+                  -annotate +0-240 '⠀⢹⣆⠸⠀⠀⢸⠀⠀⠀⠀⠘⢿⣿⣿⣿⣿⣿⣿⣟⣛⠛⠛⣛⡛⠛⠛⣛⣋⡉⠉⣡⠶⢾⣿⣿⣿⣿⣿⣿⡇⠀⠀⢀⣾⠃⠀⠀⠀⠀' \
+                  -annotate +0-220 '⠀⠀⠻⣆⡀⠀⠈⢂⠀⠀⠀⠠⡈⢻⣿⣿⣿⣿⡟⠁⠈⢧⡼⠉⠙⣆⡞⠁⠈⢹⣴⠃⠀⢸⣿⣿⣿⣿⣿⣿⠃⠀⡆⣾⠃⠀⠀⠀⠀⠀' \
+                  -annotate +0-200 '⠀⠀⠀⠈⢻⣇⠀⠀⠀⠀⠀⠀⢡⠀⠹⣿⣿⣿⣷⡀⠀⣸⡇⠀⠀⣿⠁⠀⠀⠘⣿⠀⠀⠘⣿⣿⣿⣿⣿⣿⠀⠀⣿⡇⠀⠀⠀⠀⠀⠀' \
+                  -annotate +0-180 '⠀⠀⠀⠀⠀⠹⣇⠀⠠⠀⠀⠀⠀⠡⠐⢬⡻⣿⣿⣿⣿⣿⣷⣶⣶⣿⣦⣤⣤⣤⣿⣦⣶⣿⣿⣿⣿⣿⣿⣿⠀⠀⣿⡇⠀⠀⠀⠀⠀⠀' \
+                  -annotate +0-160 '⠀⠀⠀⠀⠀⠀⠹⣧⡀⠡⡀⠀⠀⠀⠑⠄⠙⢎⠻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣦⠀⢿⡇⠀⠀⠀⠀⠀⠀' \
+                  -annotate +0-140 '⠀⠀⠀⠀⠀⠀⠀⠈⠳⣤⡐⡄⠀⠀⠀⠈⠂⠀⠱⣌⠻⣿⣿⣿⣿⣿⣿⣿⠿⣿⠟⢻⡏⢻⣿⣿⣿⣿⣿⣿⣿⠀⢸⡇⠀⠀⠀⠀⠀⠀' \
+                  -annotate +0-120 '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠻⢮⣦⡀⠂⠀⢀⠀⠀⠈⠳⣈⠻⣿⣿⣿⡇⠘⡄⢸⠀⠀⣇⠀⣻⣿⣿⣿⣿⣿⡏⠀⠸⡇⠀⠀⠀⠀⠀⠀' \
+                  -annotate +0-100 '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠛⢶⣤⣄⡑⠄⠀⠀⠈⠑⠢⠙⠻⢷⣶⣵⣞⣑⣒⣋⣉⣁⣻⣿⠿⠟⠱⠃⡸⠀⣧⠀⠀⠀⠀⠀⠀' \
+                  -annotate +0-80 '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠛⠻⣷⣄⡀⠐⠢⣄⣀⡀⠀⠉⠉⠉⠉⠛⠙⠭⠭⠄⠒⠈⠀⠐⠁⢀⣿⠀⠀⠀⠀⠀⠀' \
+                  -annotate +0-60 '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠛⠷⢦⣤⣤⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣒⡠⠄⣠⡾⠃⠀⠀⠀⠀⠀⠀' \
+                  -annotate +0-40 '⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠙⠛⠷⠶⣦⣤⣭⣤⣬⣭⣭⣴⠶⠛⠉⠀⠀⠀⠀⠀⠀⠀⠀' \
+                  -font DejaVu-Sans-Bold -pointsize 60 -fill '#0986ecff' \
+                  -annotate +0+100 "Hi Redteam" \
+                  -pointsize 40 -fill white \
+                  -annotate +0+200 "" \
+                  -font DejaVu-Sans-Mono -pointsize 36 -fill '#00aaff' \
+                  -annotate +0+280 "This system has been siezed by the Federal Bureau of Investigations" \
+                  "$IMAGE_PATH" 2>/dev/null || true
+          fi
+          
+          # Start minimal X server with image displayed
+          if [ -f "$IMAGE_PATH" ]; then
+              xinit /usr/bin/feh --fullscreen --hide-pointer "$IMAGE_PATH" -- :0 vt7 -nocursor
+          else
+              # Fallback: just start X with blank screen
+              xinit -- :0 vt7 -nocursor
+          fi
+    
+    - name: Display instruction display configured message
+      debug:
+        msg: "✓ Instruction display script created on {{ inventory_hostname }}"
+    
+    # ============================================
+    # CREATE SYSTEMD SERVICE
+    # ============================================
+    
+    - name: Create systemd service for CLI instruction display
+      copy:
+        dest: /etc/systemd/system/cli-instruction-display.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=CLI Instruction Display
+          After=systemd-user-sessions.service
+          
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/show-cli-instruction.sh
+          Restart=always
+          RestartSec=10
+          StandardInput=tty
+          TTYPath=/dev/tty7
+          TTYReset=yes
+          TTYVHangup=yes
+          
+          [Install]
+          WantedBy=multi-user.target
+      
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+    
+    - name: Enable CLI instruction display service
+      systemd:
+        name: cli-instruction-display.service
+        enabled: yes
+    
+    - name: Display service configured message
+      debug:
+        msg: "✓ CLI instruction display service enabled on {{ inventory_hostname }}"
+    
+    # ============================================
+    # CONFIGURE LOGIN MESSAGE
+    # ============================================
+    
+    - name: Create login message (MOTD)
+      copy:
+        dest: /etc/motd
+        mode: '0644'
+        content: |
+          
+          ================================================================================
+                              THIS SYSTEM HAS BEEN SEIZED
+          ================================================================================
+          
+          The Federal Bureau of Investigations has seized this system for illegal activity
+          
+          ================================================================================
+          
+    
+    - name: Display login message configured
+      debug:
+        msg: "✓ Login message configured on {{ inventory_hostname }}"
+    
+    # ============================================
+    # FINAL STATUS
+    # ============================================
+    
+    - name: Display completion message
+      debug:
+        msg: "✓ All configuration completed on {{ inventory_hostname }}. Reboot will be initiated."
+
+# ============================================
+# REBOOT HOSTS
+# ============================================
+
+- name: Reboot all hosts
+  hosts: kali_vms
+  become: yes
+  gather_facts: no
+  tags: reboot
+  
+  tasks:
+    - name: Reboot the system
+      reboot:
+        msg: "Rebooting to apply desktop environment changes"
+        connect_timeout: 5
+        reboot_timeout: 300
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+        test_command: whoami
+      
+    - name: Wait for system to come back online
+      wait_for_connection:
+        delay: 10
+        timeout: 300
+
+# ============================================
+# POST-REBOOT VERIFICATION
+# ============================================
+
+- name: Verify Configuration
+  hosts: kali_vms
+  become: yes
+  gather_facts: no
+  tags: reboot
+  
+  tasks:
+    - name: Check systemd default target
+      command: systemctl get-default
+      register: default_target
+      changed_when: false
+      
+    - name: Verify multi-user target is set
+      assert:
+        that:
+          - "'multi-user.target' in default_target.stdout"
+        success_msg: "✓ {{ inventory_hostname }} is set to CLI mode"
+        fail_msg: "✗ {{ inventory_hostname }} did not set CLI mode correctly"
+    
+    - name: Check if CLI instruction service is running
+      systemd:
+        name: cli-instruction-display.service
+      register: service_status
+      
+    - name: Display service status
+      debug:
+        msg: "✓ CLI instruction display service status on {{ inventory_hostname }}: {{ service_status.status.ActiveState }}"
+
+# ============================================
+# POST-PLAY SUMMARY
+# ============================================
+
+- name: Configuration Summary
+  hosts: localhost
+  gather_facts: no
+  tags: always
+  
+  tasks:
+    - name: Display summary
+      debug:
+        msg:
+          - "========================================"
+          - "     Configuration Summary"
+          - "========================================"
+          - "✓ All hosts have been configured"
+          - "✓ All hosts have been rebooted"
+          - "✓ Desktop environments are disabled"
+          - "✓ Systems are now in CLI-only mode"
+          - ""
+          - "Users will see an instruction screen"
+          - "with SSH connection details"
+          - "========================================"
