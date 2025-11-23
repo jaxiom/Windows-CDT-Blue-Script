@@ -29,6 +29,7 @@
         path: "{{ local_image_path }}"
       register: local_image_stat
       when: local_image_path != ""
+      become: no
       
     - name: Transfer instruction image to remote host
       copy:
