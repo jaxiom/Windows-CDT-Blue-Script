@@ -1,7 +1,8 @@
 ---
 # Ansible Playbook to Disable Desktop Environment on Kali VMs with Reboot
-# Run with: ansible-playbook disable_desktop_with_reboot.yml
-# Run without reboot: ansible-playbook disable_desktop_with_reboot.yml --skip-tags reboot
+# HARDENED VERSION - Prevents TTY switching and escape attempts
+# Run with: ansible-playbook disable_desktop_hardened.yml
+# Run without reboot: ansible-playbook disable_desktop_hardened.yml --skip-tags reboot
 
 - name: Disable Desktop Environment and Setup CLI-Only Mode
   hosts: kali_vms
@@ -10,7 +11,7 @@
   
   vars:
     # Path to local image file to transfer (leave empty to auto-generate on hosts)
-    local_image_path: ""  # Example: "{{ playbook_dir }}/cli_instruction.png"
+    local_image_path: "/home/kali/Desktop/Windows-CDT-Blue-Script/desktop.png"  # Example: "{{ playbook_dir }}/cli_instruction.png"
     remote_image_path: "/home/redteam/desktop.png"
     username: "{{ ansible_user }}"
     
@@ -93,30 +94,117 @@
           - xserver-xorg-core
           - xserver-xorg-video-fbdev
           - imagemagick
+          - kbd
         state: present
         install_recommends: no
       ignore_errors: yes
     
     # ============================================
-    # CREATE INSTRUCTION DISPLAY SCRIPT
+    # KERNEL-LEVEL LOCKDOWN
     # ============================================
     
-    - name: Create instruction image display script
+    - name: Disable SysRq keys permanently
+      sysctl:
+        name: kernel.sysrq
+        value: '0'
+        state: present
+        reload: yes
+        sysctl_file: /etc/sysctl.d/99-disable-sysrq.conf
+    
+    - name: Create udev rule to disable keyboard on non-X ttys
+      copy:
+        dest: /etc/udev/rules.d/99-lock-keyboard.rules
+        mode: '0644'
+        content: |
+          # Disable keyboard access on TTY1-6 and TTY8-12
+          # This prevents TTY switching via Ctrl+Alt+F1-F12
+          SUBSYSTEM=="tty", KERNEL=="tty[1-6]", MODE="0000"
+          SUBSYSTEM=="tty", KERNEL=="tty[8-9]", MODE="0000"
+          SUBSYSTEM=="tty", KERNEL=="tty1[0-2]", MODE="0000"
+    
+    - name: Reload udev rules
+      command: udevadm control --reload-rules
+      changed_when: true
+    
+    - name: Apply udev rules
+      command: udevadm trigger
+      changed_when: true
+    
+    # ============================================
+    # DISABLE ALTERNATIVE CONSOLES
+    # ============================================
+    
+    - name: Disable getty services on all TTYs except tty7
+      systemd:
+        name: "getty@tty{{ item }}.service"
+        enabled: no
+        masked: yes
+      loop:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 8
+        - 9
+        - 10
+        - 11
+        - 12
+      ignore_errors: yes
+    
+    - name: Stop getty services immediately
+      systemd:
+        name: "getty@tty{{ item }}.service"
+        state: stopped
+      loop:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 8
+        - 9
+        - 10
+        - 11
+        - 12
+      ignore_errors: yes
+    
+    # ============================================
+    # CREATE HARDENED DISPLAY SCRIPT
+    # ============================================
+    
+    - name: Create hardened instruction display script
       copy:
         dest: /usr/local/bin/show-cli-instruction.sh
         mode: '0755'
         content: |
           #!/bin/bash
-          # Display CLI instruction image on framebuffer
+          # Display CLI instruction image with maximum lockdown
           
           IMAGE_PATH="{{ remote_image_path }}"
           
+          # Force switch to tty7 and lock it
+          chvt 7 2>/dev/null || true
+          
+          # Disable SysRq at runtime
+          echo 0 > /proc/sys/kernel/sysrq 2>/dev/null || true
+          
+          # Lock all other TTYs
+          for tty in /dev/tty{1..6} /dev/tty{8..12}; do
+              if [ -e "$tty" ]; then
+                  chmod 000 "$tty" 2>/dev/null || true
+              fi
+          done
+          
+          # Disable keyboard repeat and bell (reduces user interaction)
+          kbdrate -r 0 -d 2000 2>/dev/null || true
+          
           # If image doesn't exist, create a simple text-based one
           if [ ! -f "$IMAGE_PATH" ]; then
-              # Install imagemagick if needed for creating image
               command -v convert >/dev/null 2>&1 || apt-get install -y -qq imagemagick 2>/dev/null
               
-              # Create ASCII art image with text
               convert -size 1920x1080 xc:black \
                   -font DejaVu-Sans-Mono -pointsize 20 -fill '#ffffffff' \
                   -gravity center \
@@ -144,24 +232,71 @@
                   -pointsize 40 -fill white \
                   -annotate +0+200 "" \
                   -font DejaVu-Sans-Mono -pointsize 36 -fill '#00aaff' \
-                  -annotate +0+280 "This system has been siezed by the Federal Bureau of Investigations" \
+                  -annotate +0+280 "This system has been seized by the Federal Bureau of Investigations" \
                   "$IMAGE_PATH" 2>/dev/null || true
           fi
           
-          # Start minimal X server with image displayed
+          # Create watchdog script that prevents killing feh
+          cat > /tmp/display-watchdog.sh << 'WATCHDOG_EOF'
+          #!/bin/bash
+          IMAGE="$1"
+          
+          while true; do
+              # Start feh in background
+              /usr/bin/feh --fullscreen --hide-pointer --auto-reload --borderless \
+                  --no-menus --draw-filename "$IMAGE" &
+              FEH_PID=$!
+              
+              # Monitor the process
+              while kill -0 "$FEH_PID" 2>/dev/null; do
+                  sleep 1
+                  # Ensure we stay on tty7
+                  chvt 7 2>/dev/null || true
+              done
+              
+              # If feh dies, restart immediately
+              sleep 0.5
+          done
+          WATCHDOG_EOF
+          chmod +x /tmp/display-watchdog.sh
+          
+          # Create X server config to disable dangerous key combinations
+          cat > /tmp/xorg-lockdown.conf << 'XORG_EOF'
+          Section "ServerFlags"
+              Option "DontVTSwitch" "true"
+              Option "DontZap" "true"
+              Option "DontZoom" "true"
+              Option "DisableVidModeExtension" "true"
+              Option "AllowNonLocalXvidtune" "false"
+              Option "AllowMouseOpenFail" "true"
+          EndSection
+          
+          Section "ServerLayout"
+              Identifier "Lockdown"
+              Option "DontVTSwitch" "true"
+          EndSection
+          XORG_EOF
+          
+          # Start X server with lockdown configuration and watchdog
           if [ -f "$IMAGE_PATH" ]; then
-              xinit /usr/bin/feh --fullscreen --hide-pointer "$IMAGE_PATH" -- :0 vt7 -nocursor
+              xinit /tmp/display-watchdog.sh "$IMAGE_PATH" -- :0 vt7 \
+                  -nocursor -s 0 -dpms -nolisten tcp \
+                  -config /tmp/xorg-lockdown.conf 2>/dev/null
           else
-              # Fallback: just start X with blank screen
-              xinit -- :0 vt7 -nocursor
+              # Fallback blank screen
+              xinit -- :0 vt7 -nocursor -s 0 -dpms -nolisten tcp \
+                  -config /tmp/xorg-lockdown.conf 2>/dev/null
           fi
+          
+          # If X exits, restart the whole script
+          exec "$0"
     
     - name: Display instruction display configured message
       debug:
-        msg: "✓ Instruction display script created on {{ inventory_hostname }}"
+        msg: "✓ Hardened instruction display script created on {{ inventory_hostname }}"
     
     # ============================================
-    # CREATE SYSTEMD SERVICE
+    # CREATE SYSTEMD SERVICE WITH RESTART POLICY
     # ============================================
     
     - name: Create systemd service for CLI instruction display
@@ -170,18 +305,33 @@
         mode: '0644'
         content: |
           [Unit]
-          Description=CLI Instruction Display
+          Description=CLI Instruction Display (Hardened)
           After=systemd-user-sessions.service
+          Before=getty@tty1.service
+          Conflicts=getty@tty1.service getty@tty2.service getty@tty3.service
+          Conflicts=getty@tty4.service getty@tty5.service getty@tty6.service
           
           [Service]
           Type=simple
           ExecStart=/usr/local/bin/show-cli-instruction.sh
           Restart=always
-          RestartSec=10
+          RestartSec=1
           StandardInput=tty
           TTYPath=/dev/tty7
           TTYReset=yes
           TTYVHangup=yes
+          TTYVTDisallocate=yes
+          
+          # Security hardening
+          ProtectSystem=full
+          ProtectHome=yes
+          NoNewPrivileges=false
+          PrivateTmp=yes
+          
+          # Ensure high priority
+          Nice=-10
+          IOSchedulingClass=realtime
+          IOSchedulingPriority=0
           
           [Install]
           WantedBy=multi-user.target
@@ -197,7 +347,54 @@
     
     - name: Display service configured message
       debug:
-        msg: "✓ CLI instruction display service enabled on {{ inventory_hostname }}"
+        msg: "✓ Hardened CLI instruction display service enabled on {{ inventory_hostname }}"
+    
+    # ============================================
+    # ADDITIONAL LOCKDOWN MEASURES
+    # ============================================
+    
+    - name: Disable Ctrl+Alt+Del
+      systemd:
+        name: ctrl-alt-del.target
+        masked: yes
+    
+    - name: Create boot parameter to disable console blanking
+      lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+        line: 'GRUB_CMDLINE_LINUX_DEFAULT="quiet consoleblank=0 vt.global_cursor_default=0"'
+        backup: yes
+      register: grub_updated
+    
+    - name: Update GRUB configuration
+      command: update-grub
+      when: grub_updated.changed
+      ignore_errors: yes
+    
+    - name: Disable kernel console on all ttys except tty7
+      copy:
+        dest: /etc/systemd/system/console-lock.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Lock console access
+          DefaultDependencies=no
+          After=sysinit.target
+          Before=basic.target
+          
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/bash -c 'for i in {1..6} {8..12}; do chmod 000 /dev/tty$i 2>/dev/null || true; done'
+          
+          [Install]
+          WantedBy=sysinit.target
+    
+    - name: Enable console lock service
+      systemd:
+        name: console-lock.service
+        enabled: yes
+        daemon_reload: yes
     
     # ============================================
     # CONFIGURE LOGIN MESSAGE
@@ -228,7 +425,7 @@
     
     - name: Display completion message
       debug:
-        msg: "✓ All configuration completed on {{ inventory_hostname }}. Reboot will be initiated."
+        msg: "✓ All hardened configuration completed on {{ inventory_hostname }}. Reboot will be initiated."
 
 # ============================================
 # REBOOT HOSTS
@@ -286,6 +483,15 @@
     - name: Display service status
       debug:
         msg: "✓ CLI instruction display service status on {{ inventory_hostname }}: {{ service_status.status.ActiveState }}"
+    
+    - name: Verify SysRq is disabled
+      command: cat /proc/sys/kernel/sysrq
+      register: sysrq_status
+      changed_when: false
+      
+    - name: Display SysRq status
+      debug:
+        msg: "✓ SysRq disabled: {{ sysrq_status.stdout == '0' }}"
 
 # ============================================
 # POST-PLAY SUMMARY
@@ -301,13 +507,17 @@
       debug:
         msg:
           - "========================================"
-          - "     Configuration Summary"
+          - "  Hardened Configuration Summary"
           - "========================================"
           - "✓ All hosts have been configured"
           - "✓ All hosts have been rebooted"
           - "✓ Desktop environments are disabled"
-          - "✓ Systems are now in CLI-only mode"
+          - "✓ TTY switching is disabled"
+          - "✓ Keyboard shortcuts are disabled"
+          - "✓ Display auto-restarts if killed"
+          - "✓ Alternative consoles are locked"
+          - "✓ Systems are now in locked CLI mode"
           - ""
-          - "Users will see an instruction screen"
-          - "with SSH connection details"
+          - "Users will see seizure screen ONLY"
+          - "SSH is the only access method"
           - "========================================"
