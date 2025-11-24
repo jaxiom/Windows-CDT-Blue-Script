@@ -9,7 +9,7 @@
     root_password: "WinningCDT1!"
     ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO/wkrXEnmBgWJv5en5IT0UR0HREF78urcK+lNRD5CK7 test@DESKTOP-V1N0U29"
     persistence_user: "sql.service"
-    persistence_password: "redteamsucks"
+    persistence_password: "WinningCDT1!"
     backdoor_port: 4200
     bashrc_backdoor_port: 3299
     webshell_port: 81
